@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Step 3: Spatial Rendering</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        #status {
+            position: absolute; top: 10px; left: 10px;
+            color: #0f0; font-family: monospace; font-weight: bold;
+            background: rgba(0,0,0,0.8); padding: 5px; pointer-events: none;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="status">Connecting to Spatial Server...</div>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- CONFIGURATION ---
+        const WORLD_SCALE = 10; // Scale up raw coords (approx 1.0 -> 10.0 units)
+        const BONE_CONNECTIONS = [
+            [0,1], [1,2], [2,3], [3,4],       // Thumb
+            [0,5], [5,6], [6,7], [7,8],       // Index
+            [0,9], [9,10], [10,11], [11,12],  // Middle
+            [0,13], [13,14], [14,15], [15,16],// Ring
+            [0,17], [17,18], [18,19], [19,20],// Pinky
+            [5,9], [9,13], [13,17]            // Palm
+        ];
+
+        // --- SCENE SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111111); // Dark gray, not pitch black
+
+        // Camera: Positioned to look at the "Center" of the interaction volume
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 0, 20); // Back 20 units
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Lighting
+        const light = new THREE.DirectionalLight(0xffffff, 1);
+        light.position.set(0, 10, 10);
+        scene.add(light);
+        scene.add(new THREE.AmbientLight(0x404040));
+
+        // --- REFERENCE GRID (The "Truth" Plane) ---
+        // A grid to verify depth. If your hand goes behind this, Z is working.
+        const gridHelper = new THREE.GridHelper(20, 20, 0xff0000, 0x444444);
+        gridHelper.rotation.x = Math.PI / 2; // Rotate to stand up like a wall? 
+        // No, let's keep it flat on the "floor" (XZ plane) but push it down slightly
+        // actually, let's make it a "Wall" at Z=0 to test penetration.
+        // gridHelper.rotation.x = Math.PI / 2; 
+        scene.add(gridHelper);
+
+        // Add a floating cube at (0,0,0) for origin reference
+        const originCube = new THREE.Mesh(
+            new THREE.BoxGeometry(1, 1, 1), 
+            new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
+        );
+        scene.add(originCube);
+
+
+        // --- HAND RENDERER CLASS ---
+        class HandRender {
+            constructor(color) {
+                this.joints = [];
+                this.bones = [];
+                this.group = new THREE.Group();
+                this.visible = false;
+
+                const jointGeo = new THREE.SphereGeometry(0.15, 8, 8);
+                const jointMat = new THREE.MeshLambertMaterial({ color: color });
+                
+                // Create 21 Joints
+                for (let i = 0; i < 21; i++) {
+                    const mesh = new THREE.Mesh(jointGeo, jointMat);
+                    this.joints.push(mesh);
+                    this.group.add(mesh);
+                }
+
+                // Create Bones (Lines)
+                const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.5, transparent: true });
+                for (let pair of BONE_CONNECTIONS) {
+                    const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,0)]);
+                    const line = new THREE.Line(geometry, lineMat);
+                    line.userData = { idxA: pair[0], idxB: pair[1] };
+                    this.bones.push(line);
+                    this.group.add(line);
+                }
+
+                scene.add(this.group);
+            }
+
+            update(landmarks) {
+                this.visible = true;
+                this.group.visible = true;
+
+                // 1. Update Joints
+                const vectors = []; // Store vector3s for bone updates
+                for (let i = 0; i < 21; i++) {
+                    const lm = landmarks[i];
+                    // MAP COORDINATES:
+                    // Server X/Y/Z are roughly -1 to 1. 
+                    // We scale by WORLD_SCALE.
+                    const x = lm.x * WORLD_SCALE;
+                    const y = lm.y * WORLD_SCALE; 
+                    const z = lm.z * WORLD_SCALE;
+                    
+                    this.joints[i].position.set(x, y, z);
+                    vectors.push(new THREE.Vector3(x, y, z));
+                }
+
+                // 2. Update Bones
+                for (let bone of this.bones) {
+                    const p1 = vectors[bone.userData.idxA];
+                    const p2 = vectors[bone.userData.idxB];
+                    const positions = new Float32Array([p1.x, p1.y, p1.z, p2.x, p2.y, p2.z]);
+                    bone.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                }
+            }
+
+            hide() {
+                if (this.visible) {
+                    this.group.visible = false;
+                    this.visible = false;
+                }
+            }
+        }
+
+        // Initialize Hand Pools
+        const leftHand = new HandRender(0x00ffff);  // Cyan for Left
+        const rightHand = new HandRender(0xff0000); // Red for Right
+
+        // --- WEBSOCKET LOOP ---
+        const ws = new WebSocket('ws://localhost:8765');
+        const statusDiv = document.getElementById('status');
+
+        ws.onopen = () => { statusDiv.textContent = "🟢 CONNECTED TO SPATIAL SERVER"; statusDiv.style.color = "#0f0"; };
+        ws.onclose = () => { statusDiv.textContent = "🔴 DISCONNECTED"; statusDiv.style.color = "#f00"; };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            // Assume hands are hidden unless found in this frame
+            let foundLeft = false;
+            let foundRight = false;
+
+            if (data.hands) {
+                data.hands.forEach(handData => {
+                    const label = handData.id; // "Left" or "Right"
+                    if (label === 'Left') {
+                        leftHand.update(handData.landmarks);
+                        foundLeft = true;
+                    } else if (label === 'Right') {
+                        rightHand.update(handData.landmarks);
+                        foundRight = true;
+                    }
+                });
+            }
+
+            if (!foundLeft) leftHand.hide();
+            if (!foundRight) rightHand.hide();
+        };
+
+        // --- ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Handle Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>
