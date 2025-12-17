@@ -2,192 +2,238 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Step 3: Spatial Rendering</title>
+    <title>Step 4: Tactile Interaction</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; }
-        #status {
-            position: absolute; top: 10px; left: 10px;
-            color: #0f0; font-family: monospace; font-weight: bold;
-            background: rgba(0,0,0,0.8); padding: 5px; pointer-events: none;
-        }
+        body { margin: 0; overflow: hidden; background-color: #111; }
+        #status { position: absolute; top: 10px; left: 10px; color: #555; font-family: sans-serif; font-size: 14px; pointer-events: none; }
     </style>
     <script type="importmap">
-        {
-            "imports": {
-                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
-            }
-        }
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
     </script>
 </head>
 <body>
-    <div id="status">Connecting to Spatial Server...</div>
+    <div id="status">Waiting for Hands...</div>
 
     <script type="module">
         import * as THREE from 'three';
 
-        // --- CONFIGURATION ---
-        const WORLD_SCALE = 10; // Scale up raw coords (approx 1.0 -> 10.0 units)
-        const BONE_CONNECTIONS = [
-            [0,1], [1,2], [2,3], [3,4],       // Thumb
-            [0,5], [5,6], [6,7], [7,8],       // Index
-            [0,9], [9,10], [10,11], [11,12],  // Middle
-            [0,13], [13,14], [14,15], [15,16],// Ring
-            [0,17], [17,18], [18,19], [19,20],// Pinky
-            [5,9], [9,13], [13,17]            // Palm
-        ];
+        // --- CONFIG ---
+        const WORLD_SCALE = 10; 
+        const GRAB_RADIUS = 2.0; 
+        const SMOOTHING = 0.15;
 
-        // --- SCENE SETUP ---
+        // --- SETUP ---
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x111111); // Dark gray, not pitch black
+        scene.background = new THREE.Color(0x1a1a1a);
 
-        // Camera: Positioned to look at the "Center" of the interaction volume
-        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
-        camera.position.set(0, 0, 20); // Back 20 units
-        camera.lookAt(0, 0, 0);
+        // Camera
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 100);
+        camera.position.set(0, 0, 15);
 
+        // Renderer
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true; // Global Shadow Flag
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Softer shadows
         document.body.appendChild(renderer.domElement);
 
         // Lighting
-        const light = new THREE.DirectionalLight(0xffffff, 1);
-        light.position.set(0, 10, 10);
-        scene.add(light);
         scene.add(new THREE.AmbientLight(0x404040));
+        
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1.5); // Bright sun
+        dirLight.position.set(5, 12, 5); // High angle
+        dirLight.castShadow = true; 
+        // Optimize shadow quality
+        dirLight.shadow.mapSize.width = 1024;
+        dirLight.shadow.mapSize.height = 1024;
+        scene.add(dirLight);
 
-        // --- REFERENCE GRID (The "Truth" Plane) ---
-        // A grid to verify depth. If your hand goes behind this, Z is working.
-        const gridHelper = new THREE.GridHelper(20, 20, 0xff0000, 0x444444);
-        gridHelper.rotation.x = Math.PI / 2; // Rotate to stand up like a wall? 
-        // No, let's keep it flat on the "floor" (XZ plane) but push it down slightly
-        // actually, let's make it a "Wall" at Z=0 to test penetration.
-        // gridHelper.rotation.x = Math.PI / 2; 
-        scene.add(gridHelper);
+        // Floor (Receives Shadow)
+        const grid = new THREE.GridHelper(30, 30, 0x333333, 0x111111);
+        grid.position.y = -4; 
+        scene.add(grid);
 
-        // Add a floating cube at (0,0,0) for origin reference
-        const originCube = new THREE.Mesh(
-            new THREE.BoxGeometry(1, 1, 1), 
-            new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
-        );
-        scene.add(originCube);
+        // Invisible Shadow Plane (to catch shadows below the grid)
+        const planeGeo = new THREE.PlaneGeometry(100, 100);
+        const planeMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a });
+        const plane = new THREE.Mesh(planeGeo, planeMat);
+        plane.rotation.x = -Math.PI / 2;
+        plane.position.y = -4.1; // Just below grid
+        plane.receiveShadow = true;
+        scene.add(plane);
 
-
-        // --- HAND RENDERER CLASS ---
-        class HandRender {
-            constructor(color) {
-                this.joints = [];
-                this.bones = [];
-                this.group = new THREE.Group();
-                this.visible = false;
-
-                const jointGeo = new THREE.SphereGeometry(0.15, 8, 8);
-                const jointMat = new THREE.MeshLambertMaterial({ color: color });
+        // --- INTERACTABLES ---
+        const interactables = [];
+        const cubeGeo = new THREE.BoxGeometry(2, 2, 2);
+        
+        function updateObjectPhysics() {
+            interactables.forEach(obj => {
+                const targetScale = obj.userData.targetScale || 1.0;
+                obj.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.2);
                 
-                // Create 21 Joints
-                for (let i = 0; i < 21; i++) {
-                    const mesh = new THREE.Mesh(jointGeo, jointMat);
-                    this.joints.push(mesh);
-                    this.group.add(mesh);
+                if (!obj.userData.isHovered && !obj.userData.isGrabbed) {
+                     obj.material.emissive.lerp(new THREE.Color(0x000000), 0.1);
+                     obj.userData.targetScale = 1.0;
+                }
+            });
+        }
+
+        const colors = [0xff4444, 0x44ff44, 0x4444ff];
+        const positions = [-4, 0, 4];
+        
+        for(let i=0; i<3; i++) {
+            const mat = new THREE.MeshStandardMaterial({ color: colors[i], roughness: 0.2, metalness: 0.1 });
+            const cube = new THREE.Mesh(cubeGeo, mat);
+            cube.position.set(positions[i], 0, 0); 
+            cube.castShadow = true;
+            cube.receiveShadow = true;
+            cube.userData = { originalColor: colors[i], isHovered: false, isGrabbed: false };
+            scene.add(cube);
+            interactables.push(cube);
+        }
+
+        // --- HAND CONTROLLER ---
+        class HandController {
+            constructor(color) {
+                this.mesh = new THREE.Group();
+                
+                // Visual Skeleton
+                this.joints = [];
+                const jointGeo = new THREE.SphereGeometry(0.12, 16, 16); // Smoother spheres
+                // UPDATED MATERIAL: Reacts to light + Casts Shadow
+                const jointMat = new THREE.MeshStandardMaterial({ 
+                    color: color, 
+                    roughness: 0.5,
+                    emissive: color,
+                    emissiveIntensity: 0.2 
+                });
+
+                for(let i=0; i<21; i++) {
+                    const j = new THREE.Mesh(jointGeo, jointMat);
+                    j.castShadow = true; // <--- SHADOWS ENABLED
+                    j.receiveShadow = true;
+                    this.joints.push(j);
+                    this.mesh.add(j);
                 }
 
-                // Create Bones (Lines)
-                const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.5, transparent: true });
-                for (let pair of BONE_CONNECTIONS) {
-                    const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,0)]);
-                    const line = new THREE.Line(geometry, lineMat);
-                    line.userData = { idxA: pair[0], idxB: pair[1] };
-                    this.bones.push(line);
-                    this.group.add(line);
-                }
+                // Removed Cursor & TouchBubble Visuals (Logic remains)
 
-                scene.add(this.group);
+                scene.add(this.mesh);
+
+                // State
+                this.pinchState = false; 
+                this.grabbedObject = null;
+                this.grabOffset = new THREE.Vector3();
+                this.smoothPos = new THREE.Vector3();
+                this.isInitialized = false;
             }
 
-            update(landmarks) {
-                this.visible = true;
-                this.group.visible = true;
+            update(handData) {
+                this.mesh.visible = true;
+                const lms = handData.landmarks;
+                const rawVectors = lms.map(lm => new THREE.Vector3(lm.x * WORLD_SCALE, lm.y * WORLD_SCALE, lm.z * WORLD_SCALE));
 
-                // 1. Update Joints
-                const vectors = []; // Store vector3s for bone updates
-                for (let i = 0; i < 21; i++) {
-                    const lm = landmarks[i];
-                    // MAP COORDINATES:
-                    // Server X/Y/Z are roughly -1 to 1. 
-                    // We scale by WORLD_SCALE.
-                    const x = lm.x * WORLD_SCALE;
-                    const y = lm.y * WORLD_SCALE; 
-                    const z = lm.z * WORLD_SCALE;
-                    
-                    this.joints[i].position.set(x, y, z);
-                    vectors.push(new THREE.Vector3(x, y, z));
+                // 1. Calculate Logic Point (Pinch Center)
+                const thumbTip = rawVectors[4];
+                const indexTip = rawVectors[8];
+                const pinchCenter = new THREE.Vector3().lerpVectors(thumbTip, indexTip, 0.5);
+
+                // 2. Smooth Logic Position
+                if (!this.isInitialized) {
+                    this.smoothPos.copy(pinchCenter);
+                    this.isInitialized = true;
+                } else {
+                    this.smoothPos.lerp(pinchCenter, SMOOTHING);
                 }
 
-                // 2. Update Bones
-                for (let bone of this.bones) {
-                    const p1 = vectors[bone.userData.idxA];
-                    const p2 = vectors[bone.userData.idxB];
-                    const positions = new Float32Array([p1.x, p1.y, p1.z, p2.x, p2.y, p2.z]);
-                    bone.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-                }
+                // 3. Update Visuals
+                for(let i=0; i<21; i++) this.joints[i].position.copy(rawVectors[i]);
+
+                // 4. Interaction (Invisible Logic)
+                this.handleInteraction(handData.pinch, this.smoothPos);
             }
 
-            hide() {
-                if (this.visible) {
-                    this.group.visible = false;
-                    this.visible = false;
+            handleInteraction(isPinching, handPos) {
+                // A. RELEASE
+                if (this.grabbedObject && !isPinching) {
+                    this.grabbedObject.userData.isGrabbed = false;
+                    this.grabbedObject.userData.targetScale = 1.0; 
+                    this.grabbedObject = null;
                 }
+
+                // B. DRAG
+                if (this.grabbedObject && isPinching) {
+                    this.grabbedObject.position.copy(handPos).add(this.grabOffset);
+                    this.grabbedObject.userData.targetScale = 0.85; // Stronger squeeze
+                    return; 
+                }
+
+                // C. FIND TARGET
+                let closestObj = null;
+                let minDst = GRAB_RADIUS;
+
+                interactables.forEach(obj => {
+                    obj.userData.isHovered = false; 
+                    const dist = obj.position.distanceTo(handPos);
+                    if (dist < minDst) {
+                        closestObj = obj;
+                        minDst = dist;
+                    }
+                });
+
+                if (closestObj) {
+                    closestObj.userData.isHovered = true;
+                    closestObj.userData.targetScale = 1.15; // Stronger pop
+                    closestObj.material.emissive.setHex(0x333333);
+
+                    if (isPinching && !this.pinchState) {
+                        this.grabbedObject = closestObj;
+                        this.grabbedObject.userData.isGrabbed = true;
+                        this.grabOffset.subVectors(closestObj.position, handPos);
+                    }
+                }
+                this.pinchState = isPinching;
+            }
+
+            hide() { 
+                this.mesh.visible = false; 
+                this.isInitialized = false; 
             }
         }
 
-        // Initialize Hand Pools
-        const leftHand = new HandRender(0x00ffff);  // Cyan for Left
-        const rightHand = new HandRender(0xff0000); // Red for Right
+        const leftHand = new HandController(0x00ffff);
+        const rightHand = new HandController(0xff0000);
 
-        // --- WEBSOCKET LOOP ---
         const ws = new WebSocket('ws://localhost:8765');
-        const statusDiv = document.getElementById('status');
+        const status = document.getElementById('status');
 
-        ws.onopen = () => { statusDiv.textContent = "🟢 CONNECTED TO SPATIAL SERVER"; statusDiv.style.color = "#0f0"; };
-        ws.onclose = () => { statusDiv.textContent = "🔴 DISCONNECTED"; statusDiv.style.color = "#f00"; };
+        ws.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+            updateObjectPhysics();
 
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            
-            // Assume hands are hidden unless found in this frame
-            let foundLeft = false;
-            let foundRight = false;
-
-            if (data.hands) {
-                data.hands.forEach(handData => {
-                    const label = handData.id; // "Left" or "Right"
-                    if (label === 'Left') {
-                        leftHand.update(handData.landmarks);
-                        foundLeft = true;
-                    } else if (label === 'Right') {
-                        rightHand.update(handData.landmarks);
-                        foundRight = true;
-                    }
+            let lFound=false, rFound=false;
+            if(data.hands) {
+                data.hands.forEach(h => {
+                    if(h.id === 'Left') { leftHand.update(h); lFound=true; }
+                    if(h.id === 'Right') { rightHand.update(h); rFound=true; }
                 });
             }
-
-            if (!foundLeft) leftHand.hide();
-            if (!foundRight) rightHand.hide();
+            if(!lFound) leftHand.hide();
+            if(!rFound) rightHand.hide();
+            status.textContent = `Tracking Active | Hands: ${data.hands.length}`;
         };
 
-        // --- ANIMATION LOOP ---
         function animate() {
             requestAnimationFrame(animate);
             renderer.render(scene, camera);
         }
         animate();
-
-        // Handle Resize
+        
         window.addEventListener('resize', () => {
-            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.aspect = window.innerWidth/window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
-
     </script>
 </body>
 </html>
