@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Step 5: Bi-Manual World Control</title>
+    <title>Step 5: Modular Bi-Manual World</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #111; }
         #status { position: absolute; top: 10px; left: 10px; color: #888; font-family: sans-serif; font-size: 14px; pointer-events: none; }
@@ -14,163 +14,374 @@
 </head>
 <body>
     <div id="status">Waiting for Hands...</div>
-    <div id="instruction">PINCH BOTH HANDS TO GRAB THE WORLD</div>
+    <div id="instruction">PINCH BOTH HANDS TO ZOOM/ROTATE WORLD | PINCH ONE HAND TO GRAB OBJECTS</div>
 
     <script type="module">
         import * as THREE from 'three';
 
-        // --- CONFIG ---
-        const WORLD_SCALE = 10; 
-        const GRAB_RADIUS = 2.0; 
-        const SMOOTHING = 0.15;
-
-        // --- SETUP ---
-        const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x1a1a1a);
-
-        const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
-        camera.position.set(0, 10, 20); // Higher vantage point
-        camera.lookAt(0, 0, 0);
-
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.shadowMap.enabled = true;
-        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        document.body.appendChild(renderer.domElement);
-
-        // Lighting
-        scene.add(new THREE.AmbientLight(0x404040));
-        const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
-        dirLight.position.set(10, 20, 10);
-        dirLight.castShadow = true;
-        dirLight.shadow.mapSize.width = 2048;
-        dirLight.shadow.mapSize.height = 2048;
-        scene.add(dirLight);
-
-        // --- THE WORLD GROUP ---
-        // Everything that can be moved/scaled goes in here
-        const worldGroup = new THREE.Group();
-        scene.add(worldGroup);
-
-        // Content inside the world
-        const grid = new THREE.GridHelper(50, 50, 0x444444, 0x222222);
-        worldGroup.add(grid);
-
-        const plane = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), new THREE.MeshStandardMaterial({ color: 0x1a1a1a }));
-        plane.rotation.x = -Math.PI / 2;
-        plane.position.y = -0.1;
-        plane.receiveShadow = true;
-        worldGroup.add(plane);
-
-        const interactables = [];
-        const cubeGeo = new THREE.BoxGeometry(2, 2, 2);
-        const colors = [0xff4444, 0x44ff44, 0x4444ff, 0xffff44, 0x44ffff];
-        const positions = [[-5,1,-5], [5,1,-5], [0,1,0], [-5,1,5], [5,1,5]];
-        
-        for(let i=0; i<5; i++) {
-            const mat = new THREE.MeshStandardMaterial({ color: colors[i], roughness: 0.2 });
-            const cube = new THREE.Mesh(cubeGeo, mat);
-            cube.position.set(...positions[i]); 
-            cube.castShadow = true;
-            cube.receiveShadow = true;
-            cube.userData = { originalColor: colors[i], isHovered: false, isGrabbed: false, targetScale: 1.0 };
-            worldGroup.add(cube);
-            interactables.push(cube);
-        }
-
-        // --- BI-MANUAL STATE ---
-        const worldState = {
-            isDragging: false,
-            prevMidpoint: new THREE.Vector3(),
-            prevDistance: 0,
-            prevAngle: 0
+        // ==========================================
+        // MODULE 1: CONFIGURATION
+        // ==========================================
+        const CONFIG = {
+            WORLD_SCALE: 10,       // Multiplier for incoming normalized coordinates
+            GRAB_RADIUS: 2.0,      // Max distance to snap to an object
+            SMOOTHING: 0.15,       // Alpha for position smoothing (0.1 = smooth, 1.0 = raw)
+            COLORS: [0xff4444, 0x44ff44, 0x4444ff, 0xffff44, 0x44ffff], // Cube colors
+            CAMERA_POS: new THREE.Vector3(0, 10, 20)
         };
 
-        // --- HAND CONTROLLER ---
-        class HandController {
-            constructor(color) {
+        // ==========================================
+        // MODULE 2: SCENE MANAGER
+        // Handles boilerplate Three.js setup (Scene, Cam, Lights)
+        // ==========================================
+        class SceneManager {
+            constructor() {
+                /** @type {THREE.Scene} */
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x1a1a1a);
+
+                /** @type {THREE.PerspectiveCamera} */
+                this.camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
+                this.camera.position.copy(CONFIG.CAMERA_POS);
+                this.camera.lookAt(0, 0, 0);
+
+                /** @type {THREE.WebGLRenderer} */
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.shadowMap.enabled = true;
+                this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                document.body.appendChild(this.renderer.domElement);
+
+                this._addLighting();
+                this._handleResize();
+            }
+
+            _addLighting() {
+                this.scene.add(new THREE.AmbientLight(0x404040));
+                const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+                dirLight.position.set(10, 20, 10);
+                dirLight.castShadow = true;
+                dirLight.shadow.mapSize.width = 2048;
+                dirLight.shadow.mapSize.height = 2048;
+                this.scene.add(dirLight);
+            }
+
+            _handleResize() {
+                window.addEventListener('resize', () => {
+                    this.camera.aspect = window.innerWidth/window.innerHeight;
+                    this.camera.updateProjectionMatrix();
+                    this.renderer.setSize(window.innerWidth, window.innerHeight);
+                });
+            }
+
+            render() {
+                this.renderer.render(this.scene, this.camera);
+            }
+        }
+
+        // ==========================================
+        // MODULE 3: WORLD CONTENT
+        // Manages the "Game World" (Grid, Floor, Interactables)
+        // ==========================================
+        class WorldContent {
+            constructor(scene) {
+                /** @type {THREE.Group} Root group for scaling/rotating everything */
+                this.group = new THREE.Group();
+                scene.add(this.group);
+
+                /** @type {THREE.Mesh[]} List of interactable objects */
+                this.interactables = [];
+
+                this._buildEnvironment();
+                this._spawnCubes();
+            }
+
+            _buildEnvironment() {
+                const grid = new THREE.GridHelper(50, 50, 0x444444, 0x222222);
+                this.group.add(grid);
+
+                const plane = new THREE.Mesh(
+                    new THREE.PlaneGeometry(100, 100), 
+                    new THREE.MeshStandardMaterial({ color: 0x1a1a1a })
+                );
+                plane.rotation.x = -Math.PI / 2;
+                plane.position.y = -0.1;
+                plane.receiveShadow = true;
+                this.group.add(plane);
+            }
+
+            _spawnCubes() {
+                const cubeGeo = new THREE.BoxGeometry(2, 2, 2);
+                const positions = [[-5,1,-5], [5,1,-5], [0,1,0], [-5,1,5], [5,1,5]];
+
+                CONFIG.COLORS.forEach((color, i) => {
+                    const mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2 });
+                    const cube = new THREE.Mesh(cubeGeo, mat);
+                    cube.position.set(...positions[i]);
+                    cube.castShadow = true;
+                    cube.receiveShadow = true;
+                    
+                    // UserData stores simulation state
+                    cube.userData = { 
+                        originalColor: color, 
+                        isHovered: false, 
+                        isGrabbed: false, 
+                        targetScale: 1.0 
+                    };
+                    
+                    this.group.add(cube);
+                    this.interactables.push(cube);
+                });
+            }
+
+            animate() {
+                // Smoothly animate hover/grab effects (Scale & Emission)
+                this.interactables.forEach(obj => {
+                    const targetScale = obj.userData.targetScale || 1.0;
+                    const lerpSpeed = 0.2;
+                    obj.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), lerpSpeed);
+                    
+                    if (!obj.userData.isHovered && !obj.userData.isGrabbed) {
+                         obj.material.emissive.lerp(new THREE.Color(0x000000), 0.1);
+                         obj.userData.targetScale = 1.0;
+                    }
+                });
+            }
+        }
+
+        // ==========================================
+        // MODULE 4: HAND REPRESENTATION
+        // Handles visual joints and position smoothing
+        // ==========================================
+        class Hand {
+            constructor(scene, color) {
+                /** @type {THREE.Group} Visual mesh container */
                 this.mesh = new THREE.Group();
-                // Visuals
                 this.joints = [];
-                const jointMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.5, emissive: color, emissiveIntensity: 0.2 });
+                
+                // Initialize joint spheres
+                const mat = new THREE.MeshStandardMaterial({ 
+                    color: color, roughness: 0.5, emissive: color, emissiveIntensity: 0.2 
+                });
+                
                 for(let i=0; i<21; i++) {
-                    const j = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 16), jointMat);
+                    const j = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 16), mat);
                     j.castShadow = true;
                     this.joints.push(j);
                     this.mesh.add(j);
                 }
-                scene.add(this.mesh); // Hands stay in ROOT scene (Camera space), not World space
+                scene.add(this.mesh);
 
-                this.pinchState = false;
-                this.smoothPos = new THREE.Vector3();
+                // State
+                this.smoothPos = new THREE.Vector3(); // The smoothed "Center of Pinch"
                 this.isInitialized = false;
+                this.pinchState = false;
                 this.grabbedObject = null;
-                this.grabOffset = new THREE.Vector3(); // Offset in Object Space
+                this.grabOffset = new THREE.Vector3();
             }
 
-            update(handData) {
+            /**
+             * Updates the hand's visual position based on WebSocket data.
+             * @param {Object} handData - Raw JSON data for this hand.
+             */
+            updateVisuals(handData) {
                 this.mesh.visible = true;
-                const lms = handData.landmarks;
-                const rawVectors = lms.map(lm => new THREE.Vector3(lm.x * WORLD_SCALE, lm.y * WORLD_SCALE, lm.z * WORLD_SCALE));
+                const rawLms = handData.landmarks;
 
-                // Pinch Center
-                const pinchCenter = new THREE.Vector3().lerpVectors(rawVectors[4], rawVectors[8], 0.5);
+                // 1. Map raw list to THREE.Vector3 array
+                const vectors = rawLms.map(lm => 
+                    new THREE.Vector3(lm.x * CONFIG.WORLD_SCALE, lm.y * CONFIG.WORLD_SCALE, lm.z * CONFIG.WORLD_SCALE)
+                );
 
+                // 2. Calculate Pinch Center (Midpoint of Thumb[4] and Index[8])
+                const pinchCenter = new THREE.Vector3().lerpVectors(vectors[4], vectors[8], 0.5);
+
+                // 3. Smooth the center position to reduce jitter
                 if (!this.isInitialized) {
                     this.smoothPos.copy(pinchCenter);
                     this.isInitialized = true;
                 } else {
-                    this.smoothPos.lerp(pinchCenter, SMOOTHING);
+                    this.smoothPos.lerp(pinchCenter, CONFIG.SMOOTHING);
                 }
 
-                // Visuals
-                for(let i=0; i<21; i++) this.joints[i].position.copy(rawVectors[i]);
+                // 4. Update Joint Meshes
+                for(let i=0; i<21; i++) {
+                    this.joints[i].position.copy(vectors[i]);
+                }
             }
 
-            // Separated Interaction Logic to be called AFTER world logic
-            processInteraction(isPinching) {
-                // If World Drag is active, disable object interaction
-                if (worldState.isDragging) {
-                    this.pinchState = isPinching;
-                    // Force release objects if we suddenly switch to world drag
-                    if (this.grabbedObject) {
-                        this.grabbedObject.userData.isGrabbed = false;
-                        this.grabbedObject = null;
+            hide() {
+                this.mesh.visible = false;
+                this.isInitialized = false;
+                // Force release if hand disappears
+                if(this.grabbedObject) {
+                    this.grabbedObject.userData.isGrabbed = false;
+                    this.grabbedObject = null;
+                }
+            }
+        }
+
+        // ==========================================
+        // MODULE 5: BI-MANUAL CONTROLLER
+        // Handles scaling/rotating the world when both hands pinch
+        // ==========================================
+        class BiManualController {
+            constructor(worldGroup) {
+                this.worldGroup = worldGroup;
+                this.isDragging = false;
+                
+                // Previous frame state for calculating deltas
+                this.prevMidpoint = new THREE.Vector3();
+                this.prevDistance = 0;
+                this.prevAngle = 0;
+            }
+
+            /**
+             * Checks hands and updates world transform.
+             * @param {Hand} left - Left Hand instance.
+             * @param {Hand} right - Right Hand instance.
+             */
+            update(left, right) {
+                // Check activation condition: Both hands active, pinching, and NOT holding objects
+                const isActive = left.isInitialized && right.isInitialized && 
+                                 left.pinchState && right.pinchState &&
+                                 !left.grabbedObject && !right.grabbedObject;
+
+                if (isActive) {
+                    const p1 = left.smoothPos;
+                    const p2 = right.smoothPos;
+
+                    // Calculate geometric metrics
+                    const currMidpoint = new THREE.Vector3().lerpVectors(p1, p2, 0.5);
+                    const currDistance = p1.distanceTo(p2);
+                    const currAngle = Math.atan2(p2.z - p1.z, p2.x - p1.x);
+
+                    if (!this.isDragging) {
+                        // START DRAG
+                        this.isDragging = true;
+                        this.prevMidpoint.copy(currMidpoint);
+                        this.prevDistance = currDistance;
+                        this.prevAngle = currAngle;
+                    } else {
+                        // CONTINUE DRAG (Apply Deltas)
+                        this._applyTranslation(currMidpoint);
+                        this._applyScale(currMidpoint, currDistance);
+                        this._applyRotation(currMidpoint, currAngle);
+
+                        // Save state for next frame
+                        this.prevMidpoint.copy(currMidpoint);
+                        this.prevDistance = currDistance;
+                        this.prevAngle = currAngle;
+                    }
+                } else {
+                    this.isDragging = false;
+                }
+
+                return this.isDragging;
+            }
+
+            _applyTranslation(currMidpoint) {
+                const delta = new THREE.Vector3().subVectors(currMidpoint, this.prevMidpoint);
+                this.worldGroup.position.add(delta);
+            }
+
+            _applyScale(currMidpoint, currDistance) {
+                const scaleFactor = currDistance / this.prevDistance;
+                
+                // Limit speed to prevent erratic jumping
+                if (scaleFactor < 0.8 || scaleFactor > 1.2) return;
+
+                // Pivot Scaling Logic:
+                // 1. Determine where the pivot point is inside the group's local space
+                const localPivot = this.worldGroup.worldToLocal(currMidpoint.clone());
+                
+                // 2. Scale the group
+                this.worldGroup.scale.multiplyScalar(scaleFactor);
+                this.worldGroup.scale.clampScalar(0.1, 5.0);
+
+                // 3. Compensate: The scale moved the point under our fingers. Move the group back.
+                this.worldGroup.updateMatrixWorld();
+                const newWorldPoint = this.worldGroup.localToWorld(localPivot.clone());
+                const drift = new THREE.Vector3().subVectors(newWorldPoint, currMidpoint);
+                this.worldGroup.position.sub(drift);
+            }
+
+            _applyRotation(currMidpoint, currAngle) {
+                const deltaAngle = currAngle - this.prevAngle;
+                // Reject large jumps (e.g. crossing 180/-180 boundary)
+                if (Math.abs(deltaAngle) > 0.2) return;
+
+                const localPivot = this.worldGroup.worldToLocal(currMidpoint.clone());
+                
+                // Rotate
+                this.worldGroup.rotateY(-deltaAngle); 
+                
+                // Compensate
+                this.worldGroup.updateMatrixWorld();
+                const newWorldPoint = this.worldGroup.localToWorld(localPivot.clone());
+                const drift = new THREE.Vector3().subVectors(newWorldPoint, currMidpoint);
+                this.worldGroup.position.sub(drift);
+            }
+        }
+
+        // ==========================================
+        // MODULE 6: OBJECT INTERACTION
+        // Handles grabbing single objects with one hand
+        // ==========================================
+        class ObjectInteraction {
+            constructor(worldGroup, interactables) {
+                this.worldGroup = worldGroup;
+                this.interactables = interactables;
+            }
+
+            /**
+             * Processes logic for a single hand.
+             * @param {Hand} hand - The hand to process.
+             * @param {boolean} isWorldDragging - Global flag to disable picking if moving world.
+             */
+            process(hand, isWorldDragging, isPinching) {
+                if (isWorldDragging) {
+                    hand.pinchState = isPinching;
+                    // Force release if world drag starts
+                    if (hand.grabbedObject) {
+                        hand.grabbedObject.userData.isGrabbed = false;
+                        hand.grabbedObject = null;
                     }
                     return;
                 }
 
-                const handPos = this.smoothPos;
-                
-                // 1. Release
-                if (this.grabbedObject && !isPinching) {
-                    this.grabbedObject.userData.isGrabbed = false;
-                    this.grabbedObject = null;
+                // 1. Release Logic
+                if (hand.grabbedObject && !isPinching) {
+                    hand.grabbedObject.userData.isGrabbed = false;
+                    hand.grabbedObject = null;
                 }
 
-                // 2. Drag Object
-                if (this.grabbedObject && isPinching) {
-                    // Complex Logic: 
-                    // Object is in WorldGroup. Hand is in Scene.
-                    // We need to map Hand Position into WorldGroup Space.
-                    const localHandPos = worldGroup.worldToLocal(handPos.clone());
-                    this.grabbedObject.position.copy(localHandPos).add(this.grabOffset);
-                    this.grabbedObject.userData.targetScale = 0.85;
+                // 2. Dragging Logic
+                if (hand.grabbedObject && isPinching) {
+                    // Convert Hand World Position -> Object Local Parent Space
+                    const localHandPos = this.worldGroup.worldToLocal(hand.smoothPos.clone());
+                    
+                    // Apply offset so object doesn't snap to center of hand instantly
+                    hand.grabbedObject.position.copy(localHandPos).add(hand.grabOffset);
+                    
+                    // Visual feedback
+                    hand.grabbedObject.userData.targetScale = 0.85; 
+                    hand.pinchState = isPinching;
                     return;
                 }
 
-                // 3. Hover/Grab
+                // 3. Hover & Grab Search
                 let closestObj = null;
-                let minDst = GRAB_RADIUS;
+                let minDst = CONFIG.GRAB_RADIUS;
 
-                // We must check distance in WORLD SPACE
-                interactables.forEach(obj => {
-                    obj.userData.isHovered = false;
-                    // Get World Position of object
-                    const worldPos = new THREE.Vector3();
-                    obj.getWorldPosition(worldPos);
+                this.interactables.forEach(obj => {
+                    obj.userData.isHovered = false; // Reset status
                     
-                    const dist = worldPos.distanceTo(handPos);
+                    // Get object's true world position (it might be inside a scaled/rotated group)
+                    const objWorldPos = new THREE.Vector3();
+                    obj.getWorldPosition(objWorldPos);
+
+                    const dist = objWorldPos.distanceTo(hand.smoothPos);
                     if (dist < minDst) {
                         closestObj = obj;
                         minDst = dist;
@@ -178,159 +389,79 @@
                 });
 
                 if (closestObj) {
+                    // Hover Effect
                     closestObj.userData.isHovered = true;
                     closestObj.userData.targetScale = 1.15;
                     closestObj.material.emissive.setHex(0x333333);
 
-                    if (isPinching && !this.pinchState) {
-                        this.grabbedObject = closestObj;
-                        this.grabbedObject.userData.isGrabbed = true;
-                        
-                        // Calculate Offset in LOCAL space
-                        const localHand = worldGroup.worldToLocal(handPos.clone());
-                        this.grabOffset.subVectors(closestObj.position, localHand);
+                    // Grab Trigger (Pinch started this frame)
+                    if (isPinching && !hand.pinchState) {
+                        hand.grabbedObject = closestObj;
+                        hand.grabbedObject.userData.isGrabbed = true;
+
+                        // Calculate offset to maintain relative position during grab
+                        const localHand = this.worldGroup.worldToLocal(hand.smoothPos.clone());
+                        hand.grabOffset.subVectors(closestObj.position, localHand);
                     }
                 }
-                this.pinchState = isPinching;
-            }
 
-            hide() { this.mesh.visible = false; this.isInitialized = false; }
+                hand.pinchState = isPinching;
+            }
         }
 
-        const leftHand = new HandController(0x00ffff);
-        const rightHand = new HandController(0xff0000);
+        // ==========================================
+        // MAIN EXECUTION
+        // ==========================================
+        const app = new SceneManager();
+        const world = new WorldContent(app.scene);
+        
+        const leftHand = new Hand(app.scene, 0x00ffff);
+        const rightHand = new Hand(app.scene, 0xff0000);
+        
+        const biManual = new BiManualController(world.group);
+        const interactions = new ObjectInteraction(world.group, world.interactables);
 
-        // --- WORLD MANIPULATION LOGIC ---
-        function updateWorldPhysics() {
-            // Check for Double Pinch
-            const isBiManual = leftHand.isInitialized && rightHand.isInitialized && 
-                               leftHand.pinchState && rightHand.pinchState &&
-                               !leftHand.grabbedObject && !rightHand.grabbedObject;
-
-            if (isBiManual) {
-                // 1. Calculate Current Metrics
-                const p1 = leftHand.smoothPos;
-                const p2 = rightHand.smoothPos;
-                
-                const currMidpoint = new THREE.Vector3().lerpVectors(p1, p2, 0.5);
-                const currDistance = p1.distanceTo(p2);
-                const currAngle = Math.atan2(p2.z - p1.z, p2.x - p1.x); // Y-Rotation (Tabletop)
-
-                if (!worldState.isDragging) {
-                    // INITIALIZE DRAG
-                    worldState.isDragging = true;
-                    worldState.prevMidpoint.copy(currMidpoint);
-                    worldState.prevDistance = currDistance;
-                    worldState.prevAngle = currAngle;
-                } else {
-                    // APPLY DELTAS
-                    
-                    // A. Translation (Move world by delta of midpoint)
-                    const deltaMove = new THREE.Vector3().subVectors(currMidpoint, worldState.prevMidpoint);
-                    worldGroup.position.add(deltaMove);
-
-                    // B. Scale (Pivot around midpoint)
-                    // We need to scale relative to the center of the hands, not world origin.
-                    // Math: Move World so Midpoint is 0, Scale, Move Back.
-                    const scaleFactor = currDistance / worldState.prevDistance;
-                    
-                    // Limit Scale speed to prevent explosion
-                    if (scaleFactor > 0.8 && scaleFactor < 1.2) { 
-                        // Simplified Pivot Scale:
-                        // 1. World -> Local conversion of pivot
-                        const localPivot = worldGroup.worldToLocal(currMidpoint.clone());
-                        
-                        // 2. Apply Scale
-                        worldGroup.scale.multiplyScalar(scaleFactor);
-                        worldGroup.scale.clampScalar(0.1, 5.0); // Safety Limits
-
-                        // 3. Compensate Position shift caused by scaling around origin
-                        // NewWorldPos = PivotWorld - (PivotLocal * NewScale)
-                        // This is tricky. Let's use the Translation compensation method:
-                        // After scaling the group, the point under the fingers moves. We must pull it back.
-                        worldGroup.updateMatrixWorld();
-                        const newWorldPointUnderFingers = worldGroup.localToWorld(localPivot.clone());
-                        const drift = new THREE.Vector3().subVectors(newWorldPointUnderFingers, currMidpoint);
-                        worldGroup.position.sub(drift);
-                    }
-
-                    // C. Rotation (Pivot around midpoint)
-                    const deltaAngle = currAngle - worldState.prevAngle;
-                    if (Math.abs(deltaAngle) < 0.2) { // Reject sudden flips
-                        // Similar Pivot Logic for Rotation
-                        const localPivot = worldGroup.worldToLocal(currMidpoint.clone());
-                        
-                        // Rotate Group
-                        worldGroup.rotateY(-deltaAngle); // Inverse logic often feels better for table rotation
-                        
-                        // Compensate Drift
-                        worldGroup.updateMatrixWorld();
-                        const newWorldPoint = worldGroup.localToWorld(localPivot.clone());
-                        const drift = new THREE.Vector3().subVectors(newWorldPoint, currMidpoint);
-                        worldGroup.position.sub(drift);
-                    }
-
-                    // Store state
-                    worldState.prevMidpoint.copy(currMidpoint);
-                    worldState.prevDistance = currDistance;
-                    worldState.prevAngle = currAngle;
-                }
-            } else {
-                worldState.isDragging = false;
-            }
-
-            // Animate Objects (Scale pop/squeeze)
-            interactables.forEach(obj => {
-                const targetScale = obj.userData.targetScale || 1.0;
-                obj.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.2);
-                if (!obj.userData.isHovered && !obj.userData.isGrabbed) {
-                     obj.material.emissive.lerp(new THREE.Color(0x000000), 0.1);
-                     obj.userData.targetScale = 1.0;
-                }
-            });
-        }
-
-        // --- LOOP ---
+        // --- WebSocket Setup ---
         const ws = new WebSocket('ws://localhost:8765');
-        const status = document.getElementById('status');
+        const statusEl = document.getElementById('status');
 
-        ws.onmessage = (e) => {
-            const data = JSON.parse(e.data);
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
             
-            let lFound=false, rFound=false;
+            // 1. Update Hand Visuals
+            let lFound = false, rFound = false;
             if(data.hands) {
                 data.hands.forEach(h => {
-                    if(h.id === 'Left') { leftHand.update(h); lFound=true; }
-                    if(h.id === 'Right') { rightHand.update(h); rFound=true; }
+                    if(h.id === 'Left') { leftHand.updateVisuals(h); lFound = true; }
+                    if(h.id === 'Right') { rightHand.updateVisuals(h); rFound = true; }
                 });
             }
             if(!lFound) leftHand.hide();
             if(!rFound) rightHand.hide();
-            status.textContent = `Hands: ${data.hands.length} | Mode: ${worldState.isDragging ? "WORLD DRAG" : "OBJECT"}`;
 
-            // 1. Process World Logic (Changes the Stage)
-            updateWorldPhysics();
+            // 2. Logic: Bi-Manual World Manipulation
+            const isWorldMoving = biManual.update(leftHand, rightHand);
 
-            // 2. Process Individual Hands (Reacts to the Stage)
-            // We pass the raw pinch state here, logic handles conflict
+            // 3. Logic: Object Interaction
+            // Extract pinch states safely
             const lPinch = data.hands.find(h=>h.id==='Left')?.pinch || false;
             const rPinch = data.hands.find(h=>h.id==='Right')?.pinch || false;
-            
-            leftHand.processInteraction(lPinch);
-            rightHand.processInteraction(rPinch);
+
+            interactions.process(leftHand, isWorldMoving, lPinch);
+            interactions.process(rightHand, isWorldMoving, rPinch);
+
+            // 4. UI Update
+            statusEl.textContent = `Hands: ${data.hands.length} | Mode: ${isWorldMoving ? "WORLD DRAG" : "OBJECT"}`;
         };
 
+        // --- Render Loop ---
         function animate() {
             requestAnimationFrame(animate);
-            renderer.render(scene, camera);
+            world.animate(); // Animate scale pops of cubes
+            app.render();
         }
         animate();
-        
-        window.addEventListener('resize', () => {
-            camera.aspect = window.innerWidth/window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
+
     </script>
 </body>
 </html>
