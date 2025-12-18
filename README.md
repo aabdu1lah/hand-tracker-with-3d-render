@@ -1,6 +1,3 @@
-Here is the complete, un-truncated `README.md` file.
-
-````markdown
 # SpatialOS (v1.0)
 
 ### 1. What This Is
