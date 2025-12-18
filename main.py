@@ -3,12 +3,12 @@ import asyncio
 from typing import List, Dict, Any, Set
 
 # Local Module Imports
-from Capture import Capture, WIDTH, HEIGHT
-from CoordinateMapper import CoordinateMapper
-from GestureEngine import GestureEngine
-from HandTracker import HandTracker
-from LandmarkSmoother import LandmarkSmoother
-from Server import Server
+from modules.Capture import Capture, WIDTH, HEIGHT
+from modules.CoordinateMapper import CoordinateMapper
+from modules.GestureEngine import GestureEngine
+from modules.HandTracker import HandTracker
+from modules.LandmarkSmoother import LandmarkSmoother
+from modules.Server import Server
 
 # Network Configuration
 HOST: str = 'localhost'

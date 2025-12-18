@@ -5,7 +5,7 @@ import numpy as np
 from typing import Optional
 
 # Default path to the model bundle
-MODEL_PATH: str = 'hand_landmarker.task'
+MODEL_PATH: str = '../models/hand_landmarker.task'
 
 class HandTracker:
     """

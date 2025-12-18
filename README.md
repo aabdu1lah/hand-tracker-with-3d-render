@@ -29,30 +29,38 @@ Violating these breaks the system:
 **Backend:**
 ```bash
 pip install opencv-python mediapipe websockets
-python sensor.py
+python main.py
 ````
 
 **Frontend:**
 
-1.  Serve the directory (e.g., VS Code "Live Server" or `python -m http.server`).
-2.  Open `client.html` in a desktop browser (Chrome/Firefox).
-3.  Verify the HUD badge reads "ONLINE".
+1.  Open `client.html` in a desktop browser (Chrome/Firefox).
+2.  Verify the HUD badge reads "ONLINE".
 
 ### 6\. Folder Structure
 
 ```text
 /
-├── sensor.py             # The Headless Perception Engine (Run this first)
-├── client.html           # The Spatial Runtime & Application Logic
-├── hand_landmarker.task  # MediaPipe Model Binary
-└── README.md             # This file
+├── main.py                   # Entry point (Run this to start the backend)
+├── client.html               # The Spatial Runtime & Application Logic
+├── requirements.txt          # Python dependencies
+├── README.md                 # This file
+├── models/                   # Machine Learning Models
+│   └── hand_landmarker.task  # MediaPipe Model Binary
+└── modules/                  # Backend Logic Split into Modules
+    ├── Capture.py            # Webcam settings and frame reading
+    ├── CoordinateMapper.py   # Math for 2D screen -> 3D world normalization
+    ├── GestureEngine.py      # Logic for Pinch/Grab state detection
+    ├── HandTracker.py        # MediaPipe inference wrapper
+    ├── LandmarkSmoother.py   # Low-pass filter for jitter reduction
+    └── Server.py             # WebSocket broadcasting logic
 ```
 
 ### 7\. Extension Points
 
   * **New Tools:** Extend the `Tool` class in `client.html` and register via `os.registerTool()`.
   * **New Interactive Objects:** Create a class with a `check(pos)` method and `serialize/hydrate` methods. Register via `os.persistence.register()`.
-  * **New Sensors:** Modify `sensor.py` to ingest different hardware (e.g., Depth Cam) as long as it outputs the **Spatial Contract**.
+  * **New Sensors:** Modify `main.py` to ingest different hardware (e.g., Depth Cam) as long as it outputs the **Spatial Contract**.
   * **DO NOT TOUCH:** The `SpatialOS` class `processFrame()` loop or the WebSocket handshake logic.
 
 ### 8\. Non-Goals
@@ -63,6 +71,3 @@ python sensor.py
   * **Haptics:** No support for physical feedback devices.
 
 <!-- end list -->
-
-```
-```
