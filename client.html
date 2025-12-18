@@ -2,378 +2,487 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Step 8: Complete Spatial OS</title>
+    <title>SpatialOS v1.0 (Product Release)</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; }
-        #status { position: absolute; top: 10px; left: 10px; color: #666; font-family: monospace; font-size: 14px; pointer-events: none; }
-        #hud { position: absolute; bottom: 20px; width: 100%; text-align: center; pointer-events: none; }
-        .hud-text { color: #fff; font-family: sans-serif; font-size: 24px; font-weight: bold; text-shadow: 0 0 10px #000; display: block; }
-        .save-text { color: #0f0; font-size: 14px; opacity: 0; transition: opacity 0.5s; }
+        /* --- VISUAL STYLING (The HUD) --- */
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
+        
+        /* The UI overlay is strictly 2D and sits "on top" of the 3D canvas */
+        #hud { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 20px; box-sizing: border-box; }
+        
+        /* Top Status Bar (Connection & Hands) */
+        #top-bar { display: flex; justify-content: space-between; align-items: flex-start; }
+        .status-badge { background: rgba(20, 20, 20, 0.8); border: 1px solid #333; padding: 8px 16px; border-radius: 20px; color: #666; font-size: 12px; font-weight: 600; transition: color 0.3s, border-color 0.3s; }
+        .status-badge.active { color: #0f0; border-color: #0f0; } /* Green = Good */
+        .status-badge.error { color: #f00; border-color: #f00; }  /* Red = Bad */
+        
+        /* Toast Notifications (e.g., "Saved") */
+        #notification-area { text-align: center; opacity: 0; transition: opacity 0.5s; }
+        .toast { background: rgba(0,0,0,0.8); color: #fff; padding: 10px 20px; border-radius: 4px; border: 1px solid #444; display: inline-block; }
+
+        /* Mode Indicator (Bottom Center) */
+        #bottom-bar { text-align: center; }
+        #mode-display { font-size: 32px; font-weight: 800; letter-spacing: 2px; text-transform: uppercase; text-shadow: 0 2px 10px rgba(0,0,0,0.8); transition: color 0.3s; }
+        
+        /* Critical Error Overlay (Blackout) */
+        #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: flex; justify-content: center; align-items: center; z-index: 999; color: #fff; opacity: 0; pointer-events: none; transition: opacity 0.3s; }
+        #overlay.visible { opacity: 1; pointer-events: all; }
     </style>
+    
     <script type="importmap">
         { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
     </script>
 </head>
 <body>
-    <div id="status">System Ready</div>
+    <div id="overlay"><h1>SYSTEM DISCONNECTED</h1></div>
     <div id="hud">
-        <span id="mode-indicator" class="hud-text">MODE: INTERACT</span>
-        <span id="save-indicator" class="save-text">STATE SAVED</span>
+        <div id="top-bar">
+            <div id="connection-status" class="status-badge">OFFLINE</div>
+            <div id="tracking-status" class="status-badge">NO HANDS</div>
+        </div>
+        <div id="notification-area"><div id="toast" class="toast">Saved</div></div>
+        <div id="bottom-bar"><div id="mode-display">INITIALIZING...</div></div>
     </div>
 
     <script type="module">
         import * as THREE from 'three';
 
-        // --- CONFIG ---
-        const WORLD_SCALE = 10; 
-        const SMOOTHING = 0.2; 
-        
-        // --- SCENE ---
-        const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x111111);
-
-        const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 100);
-        camera.position.set(0, 3, 10); 
-        camera.lookAt(0, 1, 0);
-        scene.add(camera); // Required for HUD buttons
-
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        document.body.appendChild(renderer.domElement);
-
-        scene.add(new THREE.AmbientLight(0x444444));
-        const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
-        dirLight.position.set(5, 10, 5);
-        scene.add(dirLight);
-
-        // --- WORLD ROOT ---
-        const worldGroup = new THREE.Group();
-        scene.add(worldGroup);
-
-        const grid = new THREE.GridHelper(50, 50, 0x333333, 0x111111);
-        grid.position.y = -2;
-        worldGroup.add(grid);
-
-        // --- PERSISTENCE ENGINE (Restored from Step 7) ---
-        class SceneGraph {
-            constructor() {
-                this.entities = []; 
+        // =========================================================================
+        // 1. THE CORE ENGINE (SpatialOS)
+        // This class manages the 3D world, network connection, and interaction loop.
+        // It is generic and reusable across different apps.
+        // =========================================================================
+        class SpatialOS {
+            constructor(config = {}) {
+                // Config: Scale maps normalized inputs (0-1) to World Units (meters/10)
+                this.config = { scale: 10, smoothing: 0.2, ...config };
+                this.state = { handsFound: 0, lastFrame: 0 };
+                
+                // PERFORMANCE: Pre-allocate vectors to avoid Garbage Collection
+                this._vec3 = new THREE.Vector3(); 
+                
+                // Boot Sequence
+                this.initGraphics();
+                this.initPersistence();
+                this.initTools();
+                this.initNetworking();
+                this.initHands();
+                
+                // Start Render Loop
+                this.loop();
             }
-            register(entity) { this.entities.push(entity); }
-            
-            save() {
-                // 1. Save World Transform
-                const state = {
-                    world: {
-                        pos: worldGroup.position.toArray(),
-                        rot: worldGroup.rotation.toArray(),
-                        scale: worldGroup.scale.toArray()
-                    },
-                    entities: [],
-                    drawings: [] // Special store for lines
+
+            // --- GRAPHICS SUBSYSTEM ---
+            initGraphics() {
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x111111);
+                
+                // Camera is standard eye-level
+                this.camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 100);
+                this.camera.position.set(0, 3, 10);
+                this.scene.add(this.camera);
+
+                this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                // Limit pixel ratio for performance on high-DPI screens
+                this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); 
+                document.body.appendChild(this.renderer.domElement);
+
+                // Basic Lighting
+                this.scene.add(new THREE.AmbientLight(0x444444));
+                const dl = new THREE.DirectionalLight(0xffffff, 1.0);
+                dl.position.set(5, 10, 5);
+                this.scene.add(dl);
+
+                // World Root: The container for all user content
+                this.world = new THREE.Group();
+                this.scene.add(this.world);
+                this.world.add(new THREE.GridHelper(50, 50, 0x333333, 0x111111));
+
+                // Handle Resizing
+                window.addEventListener('resize', () => {
+                    this.camera.aspect = window.innerWidth/window.innerHeight;
+                    this.camera.updateProjectionMatrix();
+                    this.renderer.setSize(window.innerWidth, window.innerHeight);
+                });
+            }
+
+            // --- NETWORKING SUBSYSTEM ---
+            initNetworking() {
+                // Connects to Python 'sensor.py'
+                this.socket = new WebSocket('ws://localhost:8765');
+                const badge = document.getElementById('connection-status');
+                const overlay = document.getElementById('overlay');
+
+                this.socket.onopen = () => {
+                    badge.innerText = "ONLINE"; badge.classList.add('active'); badge.classList.remove('error');
+                    overlay.classList.remove('visible');
                 };
-
-                // 2. Save Interactive Entities
-                this.entities.forEach(e => {
-                    state.entities.push({
-                        id: e.id,
-                        data: e.serialize()
-                    });
-                });
-
-                // 3. Save Drawings (The Lines)
-                worldGroup.children.forEach(child => {
-                    if (child.userData.isDrawing) {
-                        state.drawings.push(child.userData.points);
-                    }
-                });
-                
-                localStorage.setItem('spatial_os_v1', JSON.stringify(state));
-                
-                const ind = document.getElementById('save-indicator');
-                ind.style.opacity = 1;
-                setTimeout(() => ind.style.opacity = 0, 1000);
+                this.socket.onclose = () => {
+                    badge.innerText = "OFFLINE"; badge.classList.remove('active'); badge.classList.add('error');
+                    overlay.classList.add('visible');
+                };
+                // Incoming JSON frames trigger the update loop
+                this.socket.onmessage = (e) => this.processFrame(JSON.parse(e.data));
             }
 
-            load() {
-                const raw = localStorage.getItem('spatial_os_v1');
-                if (!raw) return;
-                const state = JSON.parse(raw);
+            // --- HAND TRACKING SUBSYSTEM ---
+            initHands() {
+                // Create two hand visuals (Left/Right)
+                this.hands = { Left: this.createHandMesh(), Right: this.createHandMesh() };
+            }
 
-                // Restore World
-                worldGroup.position.fromArray(state.world.pos);
-                worldGroup.rotation.fromArray(state.world.rot);
-                worldGroup.scale.fromArray(state.world.scale);
+            createHandMesh() {
+                const grp = new THREE.Group();
+                const joints = [];
+                const mat = new THREE.MeshBasicMaterial({ color: 0x888888 }); 
+                // Create 21 joints
+                for(let i=0; i<21; i++) {
+                    const m = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 6), mat);
+                    grp.add(m); joints.push(m);
+                }
+                // The "Stylus" (Index Tip)
+                const stylus = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+                grp.add(stylus);
+                this.scene.add(grp);
+                
+                return { 
+                    mesh: grp, joints, stylus, 
+                    smoothTip: new THREE.Vector3(), // Physics position (Smoothed)
+                    visible: false, pinch: false, 
+                    initialized: false 
+                };
+            }
 
-                // Restore Entities
-                state.entities.forEach(saved => {
-                    const entity = this.entities.find(e => e.id === saved.id);
-                    if (entity) entity.hydrate(saved.data);
-                });
+            // --- MAIN LOGIC LOOP (Triggered by Network) ---
+            processFrame(data) {
+                this.state.lastFrame = performance.now();
+                let l=false, r=false;
 
-                // Restore Drawings
-                if (state.drawings) {
-                    state.drawings.forEach(pointsData => {
-                        const geo = new THREE.BufferGeometry();
-                        const points = pointsData.map(p => new THREE.Vector3(p.x, p.y, p.z));
-                        geo.setFromPoints(points);
-                        const mat = new THREE.LineBasicMaterial({ color: 0xffff00 });
-                        const line = new THREE.Line(geo, mat);
-                        line.userData = { isDrawing: true, points: pointsData };
-                        worldGroup.add(line);
+                if (data.hands) {
+                    data.hands.forEach(h => {
+                        const hand = this.hands[h.id];
+                        if (hand) {
+                            hand.visible = true;
+                            hand.mesh.visible = true;
+                            hand.pinch = h.pinch;
+                            
+                            // 1. Map Raw Landmarks to 3D Space
+                            h.landmarks.forEach((lm, i) => {
+                                hand.joints[i].position.set(lm.x * this.config.scale, lm.y * this.config.scale, lm.z * this.config.scale);
+                            });
+
+                            // 2. Apply Smoothing to the "Stylus" (Index Tip #8)
+                            const rawTip = hand.joints[8].position;
+                            if(!hand.initialized) { hand.smoothTip.copy(rawTip); hand.initialized=true; }
+                            else { hand.smoothTip.lerp(rawTip, this.config.smoothing); }
+                            hand.stylus.position.copy(hand.smoothTip);
+
+                            if(h.id === 'Left') l = true;
+                            if(h.id === 'Right') r = true;
+                        }
                     });
                 }
+
+                // Hide hands if lost tracking
+                if(!l) { this.hands.Left.visible = false; this.hands.Left.mesh.visible = false; }
+                if(!r) { this.hands.Right.visible = false; this.hands.Right.mesh.visible = false; }
+                
+                this.updateUI(l, r);
+                this.updateLogic(l, r); // Pass to Tool System
+            }
+
+            updateUI(l, r) {
+                const badge = document.getElementById('tracking-status');
+                const count = (l?1:0) + (r?1:0);
+                if(count !== this.state.handsFound) {
+                    this.state.handsFound = count;
+                    badge.innerText = count === 0 ? "NO HANDS" : (count === 1 ? "ONE HAND" : "TWO HANDS");
+                    badge.classList.toggle('active', count > 0);
+                }
+            }
+
+            // --- PERSISTENCE SUBSYSTEM (Save/Load) ---
+            initPersistence() {
+                this.persistence = {
+                    entities: [], // Interactive objects (Slider)
+                    drawings: [], // Lines drawn by user
+                    save: () => {
+                        const data = {
+                            // Save World Transform (Navigation)
+                            world: { pos: this.world.position.toArray(), rot: this.world.rotation.toArray(), scale: this.world.scale.toArray() },
+                            // Save State of registered objects
+                            entities: this.persistence.entities.map(e => ({ id: e.id, data: e.serialize() })),
+                            drawings: []
+                        };
+                        // Save geometry of drawings
+                        this.world.children.forEach(c => {
+                            if(c.userData.isDrawing) data.drawings.push(c.userData.points);
+                        });
+                        localStorage.setItem('spatial_os_v2', JSON.stringify(data));
+                        this.notify("Saved");
+                    },
+                    load: () => {
+                        const raw = localStorage.getItem('spatial_os_v2');
+                        if(!raw) return;
+                        try {
+                            const data = JSON.parse(raw);
+                            // Restore World
+                            this.world.position.fromArray(data.world.pos);
+                            this.world.rotation.fromArray(data.world.rot);
+                            this.world.scale.fromArray(data.world.scale);
+                            // Restore Entities
+                            data.entities.forEach(s => {
+                                const ent = this.persistence.entities.find(e => e.id === s.id);
+                                if(ent) ent.hydrate(s.data);
+                            });
+                            // Restore Drawings (Requires DrawTool to exist)
+                            if(data.drawings && this.tools['DRAW']) {
+                                data.drawings.forEach(pts => this.tools['DRAW'].loadLine(pts, this.world));
+                            }
+                        } catch(e) { console.error("Corrupt Save", e); }
+                    },
+                    register: (entity) => this.persistence.entities.push(entity)
+                };
+                
+                // Auto-save every 5s
+                setInterval(() => this.persistence.save(), 5000);
+            }
+
+            notify(msg) {
+                const el = document.getElementById('toast');
+                const area = document.getElementById('notification-area');
+                el.innerText = msg;
+                area.style.opacity = 1;
+                setTimeout(() => area.style.opacity = 0, 2000);
+            }
+
+            // --- TOOL & MODE SYSTEM ---
+            initTools() {
+                this.tools = {};
+                this.activeTool = null;
+                this.modeButtons = [];
+            }
+
+            registerTool(key, toolInstance, color) {
+                toolInstance.os = this; // Dependency Injection
+                this.tools[key] = toolInstance;
+                this.tools[key].color = color;
+                
+                // Create Floating Button (Attached to Camera for HUD feel)
+                const xPos = (Object.keys(this.tools).length - 2) * 2.0; 
+                const btn = new ModeButton(key, xPos, color);
+                this.camera.add(btn.mesh);
+                this.modeButtons.push({ key, btn });
+
+                if (!this.activeTool) this.setMode(key); // Default
+            }
+
+            setMode(key) {
+                if(this.activeTool) this.activeTool.exit();
+                this.activeTool = this.tools[key];
+                this.activeTool.enter();
+                
+                // Update Visuals (Text + Hand Color)
+                const disp = document.getElementById('mode-display');
+                disp.innerText = key;
+                disp.style.color = '#' + this.activeTool.color.toString(16);
+                
+                this.hands.Left.joints.forEach(j => j.material.color.setHex(this.activeTool.color));
+                this.hands.Right.joints.forEach(j => j.material.color.setHex(this.activeTool.color));
+            }
+
+            // --- LOGIC ROUTER ---
+            updateLogic(l, r) {
+                const hl = this.hands.Left;
+                const hr = this.hands.Right;
+
+                // 1. Check Mode Switchers (Global Override)
+                let switched = false;
+                if(l) this.modeButtons.forEach(b => { if(b.btn.check(hl.smoothTip) && hl.pinch) { this.setMode(b.key); switched=true; }});
+                if(r && !switched) this.modeButtons.forEach(b => { if(b.btn.check(hr.smoothTip) && hr.pinch) { this.setMode(b.key); }});
+
+                // 2. Run Active Tool Logic
+                if(this.activeTool) this.activeTool.update(l ? hl : null, r ? hr : null);
+            }
+
+            loop() {
+                requestAnimationFrame(() => this.loop());
+                this.renderer.render(this.scene, this.camera);
             }
         }
-        const persistence = new SceneGraph();
 
+        // =========================================================================
+        // 2. INTERNAL UTILS (Components)
+        // =========================================================================
+        
+        // A 3D Button attached to the camera, used for switching modes.
+        class ModeButton {
+            constructor(label, x, color) {
+                this.mesh = new THREE.Group();
+                this.mesh.position.set(x, -2.2, -6);
+                
+                // Physical Plate
+                const plate = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.6, 0.1), new THREE.MeshStandardMaterial({ color }));
+                this.mesh.add(plate);
+                this.plate = plate;
 
-        // --- TOOLS & MODES ---
-        class Tool {
-            constructor(name, color) { this.name = name; this.color = color; }
-            enter() {} exit() {} update(l, r) {} 
+                // Text Label (Canvas Texture)
+                const cvs = document.createElement('canvas'); cvs.width=256; cvs.height=128;
+                const ctx = cvs.getContext('2d');
+                ctx.fillStyle='#fff'; ctx.font="bold 40px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle";
+                ctx.fillText(label, 128, 64);
+                const tex = new THREE.CanvasTexture(cvs);
+                const txt = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.7), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+                txt.position.z = 0.06;
+                this.mesh.add(txt);
+            }
+            // Simple Distance Check (AABB / Sphere)
+            check(pos) {
+                const wp = new THREE.Vector3(); this.plate.getWorldPosition(wp);
+                if (pos.distanceTo(wp) < 0.6) { this.plate.scale.setScalar(1.1); return true; }
+                this.plate.scale.setScalar(1.0); return false;
+            }
         }
 
-        // TOOL 1: INTERACT
-        class InteractTool extends Tool {
-            constructor() { super('INTERACT', 0x00ffff); }
+        // =========================================================================
+        // 3. STANDARD TOOLS LIBRARY
+        // =========================================================================
+        
+        // INTERACT: Standard cursor behavior. Touches objects.
+        class InteractTool {
+            constructor(sliderRef) { this.slider = sliderRef; }
+            enter() {} exit() {}
             update(l, r) {
-                [l, r].forEach(h => { if(h.visible) slider.checkInput(h.smoothTip); });
+                [l, r].forEach(h => { if(h) this.slider.check(h.smoothTip); });
             }
         }
 
-        // TOOL 2: NAVIGATE (Fixed Rotation)
-        class NavigateTool extends Tool {
+        // NAVIGATE: Bi-Manual World Manipulation (Move, Scale, Rotate)
+        class NavigateTool {
             constructor() { 
-                super('NAVIGATE', 0x00ff00); 
-                this.state = { dragging: false, prevMid: new THREE.Vector3(), prevDist: 0, prevAngle: 0 };
+                this.state = { dragging: false, prevMid: new THREE.Vector3(), prevDist: 0, prevAng: 0 }; 
             }
-            update(leftHand, rightHand) {
-                const lPinch = leftHand.visible && leftHand.isPinching;
-                const rPinch = rightHand.visible && rightHand.isPinching;
-
-                if (lPinch && rPinch) {
-                    const p1 = leftHand.smoothTip;
-                    const p2 = rightHand.smoothTip;
+            enter() {} exit() {}
+            update(l, r) {
+                // Must have TWO hands pinching
+                if (l && r && l.pinch && r.pinch) {
+                    const p1 = l.smoothTip;
+                    const p2 = r.smoothTip;
                     
-                    const currMid = new THREE.Vector3().lerpVectors(p1, p2, 0.5);
-                    const currDist = p1.distanceTo(p2);
-                    // Rotation Math: Angle between hands in X/Y plane (Steering Wheel)
-                    // Note: We map this to World Y Rotation (Tabletop spin)
-                    const currAngle = Math.atan2(p2.z - p1.z, p2.x - p1.x);
+                    // Math: Calculate Midpoint, Distance, and Angle
+                    const mid = new THREE.Vector3().lerpVectors(p1, p2, 0.5);
+                    const dist = p1.distanceTo(p2);
+                    const ang = Math.atan2(p2.z - p1.z, p2.x - p1.x);
 
                     if (!this.state.dragging) {
+                        // Start Drag
                         this.state.dragging = true;
-                        this.state.prevMid.copy(currMid);
-                        this.state.prevDist = currDist;
-                        this.state.prevAngle = currAngle;
+                        this.state.prevMid.copy(mid); this.state.prevDist = dist; this.state.prevAng = ang;
                     } else {
-                        // 1. Translate
-                        const delta = new THREE.Vector3().subVectors(currMid, this.state.prevMid);
-                        worldGroup.position.add(delta);
-
-                        // 2. Scale
-                        const scaleFactor = currDist / this.state.prevDist;
-                        if(scaleFactor > 0.9 && scaleFactor < 1.1) {
-                            worldGroup.scale.multiplyScalar(scaleFactor);
-                        }
-
-                        // 3. Rotate (The Fix)
-                        let deltaAngle = currAngle - this.state.prevAngle;
-                        // Filter jumps
-                        if (Math.abs(deltaAngle) < 0.5) {
-                            // Rotate around Vertical Axis (Y)
-                            worldGroup.rotateY(-deltaAngle);
-                        }
-
-                        this.state.prevMid.copy(currMid);
-                        this.state.prevDist = currDist;
-                        this.state.prevAngle = currAngle;
-                    }
-                } else {
-                    this.state.dragging = false;
-                }
-            }
-        }
-
-        // TOOL 3: DRAW
-        class DrawTool extends Tool {
-            constructor() { 
-                super('DRAW', 0xffff00); 
-                this.currentLine = null;
-            }
-            update(leftHand, rightHand) {
-                if (rightHand.visible) {
-                    if (rightHand.isPinching) {
-                        if (!this.currentLine) {
-                            const geo = new THREE.BufferGeometry();
-                            const mat = new THREE.LineBasicMaterial({ color: 0xffff00 });
-                            this.currentLine = new THREE.Line(geo, mat);
-                            this.currentLine.userData = { isDrawing: true, points: [] };
-                            worldGroup.add(this.currentLine);
-                        }
-                        // Save local points for persistence
-                        const localPt = worldGroup.worldToLocal(rightHand.smoothTip.clone());
-                        this.currentLine.userData.points.push({x: localPt.x, y: localPt.y, z: localPt.z});
+                        // 1. Translate World
+                        const delta = new THREE.Vector3().subVectors(mid, this.state.prevMid);
+                        this.os.world.position.add(delta);
                         
-                        // Update Mesh
-                        const pointsVec = this.currentLine.userData.points.map(p => new THREE.Vector3(p.x, p.y, p.z));
-                        this.currentLine.geometry.setFromPoints(pointsVec);
-                    } else {
-                        this.currentLine = null;
+                        // 2. Scale World (Zoom)
+                        const scale = dist / this.state.prevDist;
+                        if(scale > 0.9 && scale < 1.1) this.os.world.scale.multiplyScalar(scale);
+                        
+                        // 3. Rotate World (Steering Wheel)
+                        let rot = ang - this.state.prevAng;
+                        if(Math.abs(rot) < 0.5) this.os.world.rotateY(-rot);
+
+                        // Update State
+                        this.state.prevMid.copy(mid); this.state.prevDist = dist; this.state.prevAng = ang;
                     }
-                }
+                } else { this.state.dragging = false; }
             }
         }
 
-        // MODE MANAGER
-        class ModeManager {
-            constructor() {
-                this.modes = { 'INTERACT': new InteractTool(), 'NAVIGATE': new NavigateTool(), 'DRAW': new DrawTool() };
-                this.activeTool = this.modes['INTERACT'];
+        // DRAW: Creates geometry in mid-air
+        class DrawTool {
+            constructor() { this.curr = null; }
+            enter() {} exit() {}
+            update(l, r) {
+                // Use Right Hand to Draw
+                if (r && r.pinch) {
+                    if (!this.curr) {
+                        const g = new THREE.BufferGeometry();
+                        const m = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
+                        this.curr = new THREE.Line(g, m);
+                        this.curr.userData = { isDrawing: true, points: [] };
+                        this.os.world.add(this.curr);
+                    }
+                    // Add point in LOCAL space so it moves with the world
+                    const pt = this.os.world.worldToLocal(r.smoothTip.clone());
+                    this.curr.userData.points.push(pt);
+                    this.curr.geometry.setFromPoints(this.curr.userData.points);
+                } else { this.curr = null; }
             }
-            setMode(key) {
-                if (this.modes[key]) {
-                    this.activeTool.exit();
-                    this.activeTool = this.modes[key];
-                    this.activeTool.enter();
-                    
-                    const ind = document.getElementById('mode-indicator');
-                    ind.innerText = `MODE: ${key}`;
-                    ind.style.color = '#' + this.activeTool.color.toString(16);
-                    leftHand.setColor(this.activeTool.color);
-                    rightHand.setColor(this.activeTool.color);
-                }
-            }
-            update(l, r) { this.activeTool.update(l, r); }
-        }
-        const modeManager = new ModeManager();
-
-        // --- UI DOCK ---
-        class ModeButton {
-            constructor(label, modeKey, x, color) {
-                this.modeKey = modeKey;
-                this.mesh = new THREE.Group();
-                this.mesh.position.set(x, -2.5, -6.0); 
-
-                const geo = new THREE.BoxGeometry(1.5, 0.5, 0.1);
-                const mat = new THREE.MeshStandardMaterial({ color: color });
-                this.plate = new THREE.Mesh(geo, mat);
-                this.mesh.add(this.plate);
-
-                const canvas = document.createElement('canvas');
-                canvas.width = 256; canvas.height = 128;
-                const ctx = canvas.getContext('2d');
-                ctx.fillStyle = '#fff'; ctx.font = "bold 40px sans-serif";
-                ctx.textAlign = "center"; ctx.textBaseline = "middle"; 
-                ctx.fillText(label, 128, 64);
-                const labelMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.7), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true }));
-                labelMesh.position.z = 0.06;
-                this.mesh.add(labelMesh);
-
-                camera.add(this.mesh); 
-            }
-            checkInput(fingerPos) {
-                const worldPos = new THREE.Vector3();
-                this.plate.getWorldPosition(worldPos);
-                if (fingerPos.distanceTo(worldPos) < 0.6) {
-                    this.plate.scale.set(1.1, 1.1, 1.1);
-                    return true;
-                }
-                this.plate.scale.set(1, 1, 1);
-                return false;
+            // Restore drawing from save file
+            loadLine(pts, parent) {
+                const g = new THREE.BufferGeometry().setFromPoints(pts.map(p => new THREE.Vector3(p.x,p.y,p.z)));
+                const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xffff00 }));
+                l.userData = { isDrawing: true, points: pts };
+                parent.add(l);
             }
         }
-        const modeButtons = [
-            new ModeButton("INTERACT", 'INTERACT', -2, 0x00ffff),
-            new ModeButton("NAVIGATE", 'NAVIGATE', 0, 0x00ff00),
-            new ModeButton("DRAW", 'DRAW', 2, 0xffff00)
-        ];
 
-        // --- SLIDER (Persistent) ---
-        class SpatialSlider {
-            constructor() {
-                this.id = 'main_slider';
+        // =========================================================================
+        // 4. USER APP STARTS HERE
+        // Use the Engine and Tools defined above to build the specific app.
+        // =========================================================================
+        
+        // A Custom Slider Object that knows how to save itself
+        class MySlider {
+            constructor(os) {
+                this.id = 'demo_slider';
                 this.val = 0.5;
-                this.mesh = new THREE.Group();
-                this.mesh.position.set(0, 2, 0);
-                const bar = new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 0.1), new THREE.MeshStandardMaterial({ color: 0x444444 }));
+                this.grp = new THREE.Group();
+                this.grp.position.set(0, 2, 0);
+                
+                // Visuals
+                this.grp.add(new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 0.1), new THREE.MeshStandardMaterial({ color: 0x333333 })));
                 this.handle = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.2), new THREE.MeshStandardMaterial({ color: 0x00ffff }));
-                this.mesh.add(bar);
-                this.mesh.add(this.handle);
-                worldGroup.add(this.mesh);
+                this.grp.add(this.handle);
+                
+                // Add to OS
+                os.world.add(this.grp);
+                os.persistence.register(this);
                 this.updateVis();
-                persistence.register(this); // Track for saving
             }
             updateVis() { this.handle.position.x = (this.val - 0.5) * 4; }
-            serialize() { return { val: this.val }; }
-            hydrate(data) { this.val = data.val; this.updateVis(); }
             
-            checkInput(pos) {
-                const local = this.mesh.worldToLocal(pos.clone());
-                if (Math.abs(local.y)<0.5 && Math.abs(local.x)<2.5 && Math.abs(local.z)<0.4) {
-                    this.val = Math.max(0, Math.min(1, (local.x/4)+0.5));
+            // Interaction Check (Sticky Touch Hysteresis)
+            check(pos) {
+                const loc = this.grp.worldToLocal(pos.clone());
+                // Easy Entry (0.4), Hard Exit (Implicit via update loop continuity if we tracked state)
+                // Simplified here to box check
+                if(Math.abs(loc.y)<0.6 && Math.abs(loc.x)<2.5 && Math.abs(loc.z)<0.4) {
+                    this.val = Math.max(0, Math.min(1, (loc.x/4)+0.5));
                     this.updateVis();
                 }
             }
+            // Save/Load Logic
+            serialize() { return { val: this.val }; }
+            hydrate(data) { this.val = data.val; this.updateVis(); }
         }
-        const slider = new SpatialSlider();
 
-        // --- HAND CONTROLLER ---
-        class HandController {
-            constructor() {
-                this.mesh = new THREE.Group();
-                this.joints = [];
-                const mat = new THREE.MeshStandardMaterial({ color: 0xaaaaaa });
-                for(let i=0; i<21; i++) {
-                    this.joints.push(new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), mat));
-                    this.mesh.add(this.joints[i]);
-                }
-                this.stylus = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 16), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-                this.mesh.add(this.stylus);
-                scene.add(this.mesh);
-                this.smoothTip = new THREE.Vector3();
-                this.visible = false; this.isPinching = false; this.isInitialized = false;
-            }
-            setColor(hex) { this.joints.forEach(j => j.material.color.setHex(hex)); }
-            update(data) {
-                this.visible = true; this.mesh.visible = true; this.isPinching = data.pinch;
-                const rawVecs = data.landmarks.map(lm => new THREE.Vector3(lm.x * WORLD_SCALE, lm.y * WORLD_SCALE, lm.z * WORLD_SCALE));
-                for(let i=0; i<21; i++) this.joints[i].position.copy(rawVecs[i]);
-                if(!this.isInitialized) { this.smoothTip.copy(rawVecs[8]); this.isInitialized=true; }
-                else { this.smoothTip.lerp(rawVecs[8], SMOOTHING); }
-                this.stylus.position.copy(this.smoothTip);
-            }
-            hide() { this.visible = false; this.mesh.visible = false; }
-        }
-        const leftHand = new HandController();
-        const rightHand = new HandController();
+        // --- BOOTSTRAP ---
 
-        // --- LOOP ---
-        persistence.load(); // Restore state on start
-        setInterval(() => persistence.save(), 2000); // Auto-save
+        // 1. Initialize System
+        const os = new SpatialOS(); 
 
-        const ws = new WebSocket('ws://localhost:8765');
-        ws.onmessage = (e) => {
-            const data = JSON.parse(e.data);
-            let l=false, r=false;
-            if(data.hands) data.hands.forEach(h => {
-                if(h.id === 'Left') { leftHand.update(h); l=true; }
-                if(h.id === 'Right') { rightHand.update(h); r=true; }
-            });
-            if(!l) leftHand.hide(); if(!r) rightHand.hide();
+        // 2. Initialize App Content
+        const slider = new MySlider(os);
 
-            // Mode Switching
-            let switched = false;
-            if (l) modeButtons.forEach(btn => { if(btn.checkInput(leftHand.smoothTip) && leftHand.isPinching) { modeManager.setMode(btn.modeKey); switched=true; }});
-            if (r && !switched) modeButtons.forEach(btn => { if(btn.checkInput(rightHand.smoothTip) && rightHand.isPinching) { modeManager.setMode(btn.modeKey); }});
+        // 3. Register Tools (MUST BE BEFORE LOADING)
+        os.registerTool('INTERACT', new InteractTool(slider), 0x00ffff);
+        os.registerTool('NAVIGATE', new NavigateTool(), 0x00ff00);
+        os.registerTool('DRAW', new DrawTool(), 0xffff00);
 
-            modeManager.update(leftHand, rightHand);
-        };
-
-        function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
-        animate();
-        window.addEventListener('resize', () => { camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+        // 4. Load Previous Session
+        os.persistence.load(); 
 
     </script>
 </body>
