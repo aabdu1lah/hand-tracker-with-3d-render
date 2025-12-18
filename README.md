@@ -28,7 +28,7 @@ Violating these breaks the system:
 ### 5. Minimal Setup
 **Backend:**
 ```bash
-pip install opencv-python mediapipe websockets
+pip install -r requirements.txt
 python main.py
 ````
 
